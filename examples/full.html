@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<style>
+	.rootapp { width:90%; border: solid; margin: 10px; padding: 10px; }
+	.childapp { width: 100px; border: solid; margin: 10px; padding: 10px; }
+</style>
+
+<script src="https://cdn.jsdelivr.net/gh/kofifus/QuikApp@latest/quikapp.js"></script>
+</head>
+
+<body>
+<root- id="R0" class="rootapp"></root->
+
+<script>
+
+const { app, mount, quikApp, H, DispatchEvent } = window.QuikApp;
+
+const getID = el => el.getAttribute('id')
+const byID = id => document.getElementById(id)
+
+const waitElement = (id, done) => {
+  if (byID(id)) done(); else requestAnimationFrame(() => waitElement(id, done))
+}
+const waitElementGone = (id, done) => {
+  if (!byID(id)) done(); else requestAnimationFrame(() => waitElementGone(id, done))
+}
+
+
+quikApp('root-', ({ hostNode }) => {
+
+  let hostId = getID(hostNode)
+  let rootOn = false
+  let timerOn = false
+  let watchIds = []
+
+  const AddSW = () => {
+    let slot = watchIds.indexOf(null)
+    if (slot == -1) slot = watchIds.length
+    watchIds[slot] = `${hostId}/W${slot}`
+    if (slot > 0) waitElement(watchIds[slot], _ => byID(watchIds[slot - 1])?.resetSibling())
+  }
+
+  const SWclosed = el => {
+    let slot = watchIds.indexOf(el.id)
+    watchIds[slot] = null
+    let prevElem = el.previousSibling
+    if (prevElem.resetSibling) waitElementGone(el.id, _ => prevElem.resetSibling())
+  }
+
+  const ValueSet = (id, v) => {
+    let sw = byID(id)
+    if (!sw) return
+    alert(`${hostId} msg: Setting Stopwatch ${id} ${sw.value} -> ${v}`)
+    sw.ValueSet(v)
+  }
+
+  const htmlStopwatches = () =>
+    watchIds
+      .filter(id => id != null)
+      .map(id => H`<stopwatch- id="${id}" key="${id}" class="childapp"></stopwatch->`)
+
+  return {
+    view: () => H`
+      ${hostId}\xa0\xa0\xa0\xa0
+      <button onclick=${AddSW}>+</button>
+      <br/><br/>
+      <button ${!watchIds[0] ? 'disabled' : ''}  onclick=${[ValueSet, `${hostId}/W0`, 100]}>Stopwatch0 set</button>
+      <br/>
+      <label><input type="checkbox" onchange=${() => { rootOn = !rootOn }} />Add Root</label>  
+      <label><input type="checkbox" style="margin-left:10px" onchange=${() => { timerOn = !timerOn }}/>Add Timer</label>
+      <br/><br/>
+      ${htmlStopwatches()}
+      ${rootOn ? H`<root- class="rootapp" id="${hostId}/R"></root->` : ''}
+      ${timerOn ? H`<timer- class="rootapp" id="${hostId}t" style="display:inline-block"></timer->` : ''}
+    `,
+
+    methods: {
+      SWclosed
+    },
+
+    destroy: () => { alert(`${hostId} msg: destroyed`) }
+  }
+})
+
+// ----------------------------
+
+quikApp('stopwatch-', ({ hostNode, parentNode, dispatch, publishAtom, subscribeAtom, unpublishAtom, unsubscribeAtom }) => {
+  let hostId = getID(hostNode)
+
+  let value = 0
+  let interValId = undefined
+
+  const ToggleWatch = ev => {
+    let freq = 200
+    let FW = () => { value += freq }
+
+    interValId = interValId
+      ? clearInterval(interValId)
+      : setInterval(() => { dispatch(FW) }, freq)
+  }
+
+  const setValue = [undefined, () => { hostNode.value = value }]
+
+  const logValue = (() => {
+    let prevValue
+
+    return [
+      () => { prevValue = value },
+      () => { console.log(`${prevValue} -> ${value}`) }
+    ]
+  })()
+
+  hostNode.atoms = { value: publishAtom(() => value) }
+
+  let rightSiblingAtom;
+
+  return {
+    view: () => H`
+      ${hostId}<input type="button" value="x" style="float: right;" onclick=${[parentNode.SWclosed, hostNode]} />
+      <br/><br/><div class=${({ red: value > 1000 })}>${value}${value > 1000 && ' BIG'}</div>
+      <br/>right:${rightSiblingAtom?.()}<div ></div>
+      <br/><button onclick=${ToggleWatch} style="color:red">start/stop</button>
+    `,
+
+    methods: {
+      ValueSet: v => { value = v },
+
+      resetSibling: () => {
+        let rightSibling = hostNode.nextSibling
+        rightSiblingAtom?.(false)
+        if (rightSibling) rightSiblingAtom = subscribeAtom(rightSibling.atoms.value)
+      }
+    },
+
+    dispatch: [setValue, logValue],
+
+    destroy: () => { alert(`stopwatch ${hostId} destroyed`); clearInterval(interValId) }
+  }
+})
+
+app('timer-', hostNode => {
+  hostNode.innerHTML = '<div>Timer: <span id="timerVal"></span></div>'
+  let span = document.getElementById('timerVal')
+
+  let interval
+  let counter = 0;
+  interval = setInterval(() => { span.innerText = ++counter }, 500)
+
+  function unmount(hostNode) {
+    interval = clearInterval(interval)
+    alert('timer- destroyed')
+  }
+
+  return unmount
+})
+
+
+
+mount(document.getElementsByTagName('root-')[0]) // mount root
+
+</script>
+</body>
+</html>
