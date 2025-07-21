@@ -19,12 +19,8 @@ const { app, mount, quikApp, H, DispatchEvent } = window.QuikApp;
 const getID = el => el.getAttribute('id')
 const byID = id => document.getElementById(id)
 
-const waitElement = (id, done) => {
-  if (byID(id)) done(); else requestAnimationFrame(() => waitElement(id, done))
-}
-const waitElementGone = (id, done) => {
-  if (!byID(id)) done(); else requestAnimationFrame(() => waitElementGone(id, done))
-}
+const waitElement = (id, done, shouldExist = true) =>
+  shouldExist === !!byID(id) ? done() : requestAnimationFrame(() => waitElement(id, done, shouldExist));
 
 
 quikApp('root-', ({ hostNode }) => {
@@ -45,7 +41,7 @@ quikApp('root-', ({ hostNode }) => {
     let slot = watchIds.indexOf(el.id)
     watchIds[slot] = null
     let prevElem = el.previousSibling
-    if (prevElem.resetSibling) waitElementGone(el.id, _ => prevElem.resetSibling())
+    if (prevElem.resetSibling) waitElement(el.id, _ => prevElem.resetSibling(), false)
   }
 
   const ValueSet = (id, v) => {
@@ -83,7 +79,6 @@ quikApp('root-', ({ hostNode }) => {
   }
 })
 
-// ----------------------------
 
 quikApp('stopwatch-', ({ hostNode, parentNode, dispatch, publishAtom, subscribeAtom, unpublishAtom, unsubscribeAtom }) => {
   let hostId = getID(hostNode)
@@ -154,6 +149,7 @@ app('timer-', hostNode => {
 
   return unmount
 })
+
 
 mount(document.getElementsByTagName('root-')[0]) // mount root
 
