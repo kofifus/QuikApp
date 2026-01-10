@@ -1,5 +1,5 @@
 "use strict";
-// uglifyjs quikapp.js  -c --mangle-props reserved=['QuikApp','quikApp','app','mount','quickApp','H','DispatchEvent','view','dispatch','methods','destroy','hostNode','parentNode','dispatch','publishAtom','subscribeAtom','unpublishAtom','unsubscribeAtom'] -o quikapp.min.js
+// uglifyjs quikapp.js  -c --mangle-props reserved=['QuikApp','quikApp','app','mount','quickApp','H','DispatchEvent','view','dispatch','methods','destroy','hostNode','parentNode','dispatch','subscribeAtom'] -o quikapp.min.js
 
 (() => {
 
@@ -237,37 +237,35 @@
     }
   }
 
-  // an atom is a function (dispatch, atomAction) =>  () => val
-  // which registers a subscriber and returns the atom's value getter
+  // an atom is a function (subscriberDispatch, subscriberAction, funsubscribe) =>  () => val
 
   // publishedAtoms: Map of atom -> [ fselector, [ value ], subscribersMap ]
   // fselector: () => value
-  // subscribersMap: Map clientDispatch -> [atomAction, funsubscribe]
+  // value: the result of fselector() invoked after every dispatch
+  // subscribersMap: Map clientDispatch -> [subscriberAction, funsubscribe]
+  // subscribedAtoms: Map atom -> funsubscribe
 
-  // subscribedAtoms: set of Atoms
+  // using a separate function that only has arr in it's closure
+  const getter = (arr, funsubscribe) => x => {
+    if (x===false) funsubscribe()
+    return arr[0]
+  }
 
-  // moving this into a separate function that only has entry in it's closure
-  const getter = entry => () => entry[0]
-
+  // create a new atom given a selector function that returns the atom value
   const atomPublish = (publishedAtoms, fselector) => {
     let subscribersMap = new Map()
     let entry = [fselector, [fselector()], subscribersMap]
 
-    let atom = (dispatch, atomAction, funsubscribe) => {
-      if (atomAction == 'subscriberdisconnected') { subscribersMap.delete(dispatch); return }
-      subscribersMap.set(dispatch, [atomAction, funsubscribe])
-      return getter(entry[1])
+    // funsubscribe_ removes the atom from the subscriber's subscribedAtoms
+    const atom = (dispatch, subscriberAction, funsubscribe_) => {
+      const funsubscribe = () => { funsubscribe_(); subscribersMap.delete(dispatch); }
+      subscribersMap.set(dispatch, [subscriberAction, funsubscribe])
+      let fAtomValue = getter(entry[1], funsubscribe) // minimize closure
+      return fAtomValue
     }
 
     publishedAtoms.set(atom, entry)
     return atom
-  }
-
-  const emptyAction = () => { }
-
-  const atomSubscribe = (subscribedAtoms, dispatch, atom, atomAction) => {
-    subscribedAtoms.add(atom)
-    return atom(dispatch, atomAction || emptyAction, atom => subscribedAtoms.delete(atom)) // return the value getter
   }
 
   const atomsDispatch = publishedAtoms => {
@@ -276,25 +274,27 @@
       let newVal = fselector()
       if (equal(newVal, prevVal)) continue;
       entry[1][0] = newVal
-      for (let [clientDispatch, [atomAction, funsubscribe]] of subscribersMap) clientDispatch([atomAction, newVal, prevVal])
+      for (let [clientDispatch, [subscriberAction, funsubscribe]] of subscribersMap) clientDispatch([subscriberAction, newVal, prevVal])
     }
   }
 
-  const atomUnpublish = (publishedAtoms, atom) => {
-    let entry = publishedAtoms.get(atom)
-    if (!entry) return
-    entry[1][0] = undefined // clear value that is held by subscribers getters
-    for (let [clientDispatch, [atomAction, funsubscribe]] of entry[2]) {
-      funsubscribe(atom)
-      clientDispatch([atomAction, 'publisherdisconnected']) // notify subscribers
-    }
-    publishedAtoms.delete(atom)
+  // register a subscriber so that whenever the atom value (on the publisher) changes
+  // the publisher will invoke subscriberDispatch with action
+  // returns fAtomValue: () => val to be used by the subscriber for ie rendering
+  const atomSubscribe = (subscribedAtoms, dispatch, atom, subscriberAction = (() => {})) => {
+    let funsubscribe_ = () => subscribedAtoms.delete(atom) 
+    var fAtomValue = atom(dispatch, subscriberAction, funsubscribe_) // return the value fAtomValue
+    let funsubscribe = () => fAtomValue(false) // deletes from subscribedAtoms and the publisher's subscribedMap
+    subscribedAtoms.set(atom, funsubscribe) 
+    return fAtomValue
   }
 
-  const atomUnsubscribe = (subscribedAtoms, dispatch, atom) => {
-    if (!subscribedAtoms.has(atom)) return
-    atom(dispatch, 'subscriberdisconnected') // notify publisher
-    subscribedAtoms.delete(atom)
+  const atomUnpublish = (valArr, subscribersMap) => {
+    valArr[0] = undefined // clear value that is held by subscribers fAtomValue
+    for (let [clientDispatch, [subscriberAction, funsubscribe]] of subscribersMap) {
+      funsubscribe() // removes atom from subscribersMap and the subscriber's subscribedAtoms
+      clientDispatch([subscriberAction, 'publisherdisconnected']) // notify subscribers
+    }
   }
 
 
@@ -304,7 +304,7 @@
     let busy
     let conf
     let publishedAtoms = new Map()
-    let subscribedAtoms = new Set()
+    let subscribedAtoms = new Map()
 
     const rafDispatch = action => requestAnimationFrame(() => dispatch(action))
 
@@ -333,15 +333,10 @@
       atomsDispatch(publishedAtoms)
     }
 
-    const publishAtom = fselector => atomPublish(publishedAtoms, fselector)
-    const subscribeAtom = (atom, atomAction) => atomSubscribe(subscribedAtoms, dispatch, atom, atomAction)
-    const unpublishAtom = atom => atomUnpublish(publishedAtoms, atom)
-    const unsubscribeAtom = atom => atomUnsubscribe(subscribedAtoms, dispatch, atom)
+    const subscribeAtom = (atom, subscriberAction) => atomSubscribe(subscribedAtoms, dispatch, atom, subscriberAction)
 
     conf = getConf({
-      hostNode, parentNode, dispatch: rafDispatch,
-      publishAtom, subscribeAtom, unpublishAtom, unsubscribeAtom,
-    })
+      H, DispatchEvent, hostNode, parentNode, dispatch: rafDispatch, subscribeAtom })
 
     if (!conf.dispatch) conf.dispatch = []
     else if (!isArr(conf.dispatch[0])) conf.dispatch = [conf.dispatch]
@@ -350,6 +345,12 @@
     let methodsEntries = Object.entries(conf.methods || {}).map(([name, action]) => [name, (...args) => dispatch([action].concat(args))])
     Object.assign(hostNode, Object.fromEntries(methodsEntries))
 
+    if (conf.atoms) {
+      // convert conf.atoms to hostNode.atoms
+      let atomEntries = Object.entries(conf.atoms).map(([name, fselector]) => [name, atomPublish(publishedAtoms, fselector) ])
+      hostNode.atoms = Object.fromEntries(atomEntries)
+    }
+    
     let display = window.getComputedStyle(hostNode).display
     if (!display || display == 'inline') hostNode.style.display = 'inline-block'
 
@@ -357,9 +358,10 @@
 
     // return the unmount function
     return _ => {
-      for (let [atom, entry] of publishedAtoms) atomUnpublish(publishedAtoms, atom)
-      for (let atom of subscribedAtoms) atomUnsubscribe(subscribedAtoms, dispatch, atom)
       unmountChildren(vdom.children)
+      for (let [atom, entry] of publishedAtoms) atomUnpublish(entry[1], entry[2]) 
+      publishedAtoms.clear()
+      for (let [atom, funsubscribe] of subscribedAtoms) funsubscribe()
       conf.destroy?.()
       vdom = undefined
     }
@@ -610,6 +612,6 @@
   }
 
 
-  window.QuikApp = { app, mount, quikApp, H, DispatchEvent }
+  window.QuikApp = { app, mount, quikApp }
 
 })()
