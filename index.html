@@ -16,16 +16,22 @@
 
 <script>
 
-const { app, quikApp, mount } = window.QuikApp;
-
 const getID = el => el.getAttribute('id')
 const byID = id => document.getElementById(id)
 
-const waitElement = (id, done, shouldExist = true) =>
-  shouldExist == !!byID(id) ? done(id) : requestAnimationFrame(() => waitElement(id, done, shouldExist));
+// polls until DOM node is committed in the next render frame
+const waitElement = (id, done) => {
+  let elem = byID(id)
+  if (!!elem) return done(elem)
+  requestAnimationFrame(() => waitElement(id, done))
+}
+const waitElementGone = (id, done) => {
+  let elem = byID(id)
+  if (!!!elem) return done(id)
+  requestAnimationFrame(() => waitElementGone(id, done))
+}
 
-
-quikApp('root-', ({ hostNode, H }) => {
+let rootMountFn = window.quikApp('root-', ({ hostNode, H }) => {
 
   let hostId = getID(hostNode)
   let rootOn = false
@@ -38,41 +44,34 @@ quikApp('root-', ({ hostNode, H }) => {
     let id = `${hostId}/W${slot}`
     watchIds[slot] = id
 
-    let prev = slot == 0 ? undefined : byID(watchIds[slot - 1])
-    waitElement(watchIds[slot], id => {
-      byID(id).resetSibling()
-      prev?.resetSibling()
+    waitElement(watchIds[slot], elem => {
+      // establishe bidirectional atom subscriptions between neighbors
+      let prev = elem.previousSibling
+      if (prev?.tagName != 'STOPWATCH-') prev = undefined 
+      elem.subscribeToSibling('left')
+      prev?.subscribeToSibling('right')
+      elem.subscribeToSibling('right')
     })
   }
 
-  const SWclosed = el => {
-    let slot = watchIds.indexOf(el.id)
-    watchIds[slot] = null
-    let prev = el.previousSibling, next = el.nextSibling
-    waitElement(el.id, _ => {
-      prev.resetSibling?.()
-      next.resetSibling?.()
-    }, false)
-  }
-
-  const ValueSet = (id, v) => {
+  const SetValue = (id, v) => {
     let sw = byID(id)
     if (!sw) return
     alert(`${hostId} msg: Setting Stopwatch ${id} ${sw.value} -> ${v}`)
-    sw.ValueSet(v)
+    sw.SetValue(v)
   }
 
   const htmlStopwatches = () =>
     watchIds
       .filter(id => id != null)
-      .map(id => H`<stopwatch- id="${id}" key="${id}" class="childapp"></stopwatch->`)
+      .map(id => H`<stopwatch- id="${id}" class="childapp"></stopwatch->`)
 
   return {
     view: () => H`
       ${hostId}\xa0\xa0\xa0\xa0
       <button onclick=${AddSW}>+</button>
       <br/><br/>
-      <button ${!watchIds[0] ? 'disabled' : ''}  onclick=${[ValueSet, `${hostId}/W0`, 100]}>Stopwatch0 set</button>
+      <button ${!watchIds[0] ? 'disabled' : ''}  onclick=${[SetValue, `${hostId}/W0`, 100]}>Stopwatch0 set</button>
       <br/>
       <label><input type="checkbox" onchange=${() => { rootOn = !rootOn }} />Add Root</label>  
       <label><input type="checkbox" style="margin-left:10px" onchange=${() => { timerOn = !timerOn }}/>Add Timer</label>
@@ -83,7 +82,19 @@ quikApp('root-', ({ hostNode, H }) => {
     `,
 
     methods: {
-      SWclosed
+      SWclosed: el => {
+        let slot = watchIds.indexOf(el.id)
+        watchIds[slot] = null
+        
+        let prev = el.previousSibling, next = el.nextSibling
+        if (prev?.tagName != 'STOPWATCH-') prev = undefined 
+        
+        waitElementGone(el.id, _ => {
+          // re-establishes adjacency after DOM removal shifts sibling chain
+          prev?.subscribeToSibling('right')
+          next?.subscribeToSibling('left')
+        })
+      }
     },
 
     destroy: () => { alert(`${hostId} msg: destroyed`) }
@@ -91,7 +102,7 @@ quikApp('root-', ({ hostNode, H }) => {
 })
 
 
-quikApp('stopwatch-', ({ hostNode, parentNode, H, dispatch, subscribeAtom, unsubscribeAtom }) => {
+window.quikApp('stopwatch-', ({ hostNode, parentNode, H, dispatchFn, atomSubscribeFn }) => {
   let hostId = getID(hostNode)
 
   let value = 0
@@ -101,13 +112,13 @@ quikApp('stopwatch-', ({ hostNode, parentNode, H, dispatch, subscribeAtom, unsub
     let freq = 200
     let FW = () => { value += freq }
 
-    interValId = interValId
-      ? clearInterval(interValId)
-      : setInterval(() => { dispatch(FW) }, freq)
+    if (interValId) {
+      clearInterval(interValId)
+      interValId = undefined
+    } else {
+      interValId = setInterval(() => { dispatchFn(FW) }, freq)
+    }
   }
-
-  // a dispatch hook that store the value in hostNode.value 
-  const storeValue = [undefined, () => { hostNode.value = value }]
 
   // a dispatch hook that logs value changes
   const logValue = (() => {
@@ -119,7 +130,7 @@ quikApp('stopwatch-', ({ hostNode, parentNode, H, dispatch, subscribeAtom, unsub
     ]
   })()
 
-  // subsribe to an atom returning the value of the right stopwatch sibling
+  // subsribe to an atom returning the value of the left/right stopwatch sibling
   let leftSiblingAtom;
   let rightSiblingAtom;
 
@@ -132,33 +143,35 @@ quikApp('stopwatch-', ({ hostNode, parentNode, H, dispatch, subscribeAtom, unsub
       <br/><br/><button onclick=${ToggleWatch} style="color:red">start/stop</button>
     `,
 
+    properties: {
+      // external snapshot API updated per dispatch cycle
+      value: () => value
+    },
+      
     methods: {
-      ValueSet: v => { value = v },
+      SetValue: v => { value = v },
 
-      resetSibling: () => {
-        let leftSibling = hostNode.previousSibling, rightSibling = hostNode.nextSibling
-        if (leftSibling?.tagName == 'STOPWATCH-') {
-          leftSiblingAtom?.(false) // unsubscribe atom
-          leftSiblingAtom = subscribeAtom(leftSibling.atoms.value) // resubscribe
-        }
-        if (rightSibling) {
-          rightSiblingAtom?.(false) // unsubscribe atom
-          rightSiblingAtom = subscribeAtom(rightSibling.atoms.value) // resubscribe
-        }
-      }
+      subscribeToSibling: side => {
+        let sibling = side == 'left' ? hostNode.previousSibling : hostNode.nextSibling
+        if (sibling?.tagName != 'STOPWATCH-') return
+        let atom = atomSubscribeFn(sibling.atoms.value)
+        if (side == 'left') leftSiblingAtom?.unsubscribe(); else rightSiblingAtom?.unsubscribe() // cleanup, this is optional otherwise GC will do it
+        if (side == 'left') leftSiblingAtom = atom; else rightSiblingAtom=atom 
+      },
     },
 
-    dispatch: [storeValue, logValue],
+    wrapper: logValue,
 
     atoms: {
-			value: () => value
+      // publishes state for cross-app subscription 
+      value: () => value
     },
     
     destroy: () => { alert(`stopwatch ${hostId} destroyed`); clearInterval(interValId) }
   }
 })
 
-app('timer-', hostNode => {
+window.quikApp('timer-', false, hostNode => {
   hostNode.innerHTML = '<div>Timer: <span id="timerVal"></span></div>'
   let span = document.getElementById('timerVal')
 
@@ -166,16 +179,15 @@ app('timer-', hostNode => {
   let counter = 0;
   interval = setInterval(() => { span.innerText = ++counter }, 500)
 
-  function unmount(hostNode) {
+  // return the unmount function
+  return hostNode => {
     interval = clearInterval(interval)
     alert('timer- destroyed')
   }
-
-  return unmount
 })
 
 
-mount(byID('R0')) // mount root
+rootMountFn(byID('R0')) // mount root
 
 </script>
 </body>
