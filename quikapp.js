@@ -7,23 +7,23 @@
   const isFunc = o => typeof o === "function"
   const isStr = o => typeof o === "string"
   
-  let apps = new Map()
+  let appRegistry = new Map()
 
-  const getAppMountFn = name => apps.get(name?.toLowerCase()) // return the mount function
+  const getAppMountFn = name => appRegistry.get(name?.toLowerCase()) // return the mount function
 
-  const createClass = obj => {
+  const createClass = v => {
     let out = ""
-    if (isStr(obj)) return obj
+    if (isStr(v)) return v
 
-    if (isArr(obj)) {
-      for (let k = 0; k < obj.length; k++) {
-        let tmp = createClass(obj[k])
+    if (isArr(v)) {
+      for (let k = 0; k < v.length; k++) {
+        let tmp = createClass(v[k])
         if (tmp) out += (out && " ") + tmp
       }
 
     } else {
-      for (let k in obj) {
-        if (obj[k]) out += (out && " ") + k
+      for (let k in v) {
+        if (v[k]) out += (out && " ") + k
       }
     }
 
@@ -82,8 +82,8 @@
     vdom.node = node
     parentNode.insertBefore(node, referenceNode)
 
-    let mountFn = getAppMountFn(node.tagName)
-    if (mountFn) node._unmount = mountFn(node, parentNode)
+    let appMountFn = getAppMountFn(node.tagName)
+    if (appMountFn) node._unmount = appMountFn(node, parentNode)
 
     return node
   }
@@ -93,7 +93,7 @@
     parent.removeChild(vdom.node)
   }
 
-  const getKey = o => o?.props?.key ?? o?.props?.id
+  const getKey = vnode => vnode?.props?.key ?? vnode?.props?.id
 
   const patch = (parent, node, oldVNode, newVNode, listener, isSvg, isRoot) => {
 
@@ -239,13 +239,13 @@
   // an atom is a function (subscriberDispatch, subscriberAction, funsubscribe) =>  f
   // returned f is: () => val 	with .unsubscribe() method 
 
-  // publishedAtoms: Map of atom -> [ fselector, [ value ], subscribersMap ]
-  // fselector: () => value
-  // value: the result of fselector() invoked after every dispatch
+  // publishedAtoms: Map of atom -> [ selector, [ value ], subscribersMap ]
+  // selector: () => value
+  // value: the result of selector() invoked after every dispatch
   // subscribersMap: Map _ => [ subscriberDispatch,  subscriberAction, funsubscribe ]
   // subscribedAtoms: Map _ => unsubscribe 
 
-  let atomsSubscriberFinalizationRegistry = new FinalizationRegistry(cleanupSubscriber => cleanupSubscriber())
+  let atomsSubscriberFinalizationRegistry = new FinalizationRegistry(cleanupSubscription => cleanupSubscription())
 
   // using a separate function that only has arr in it's closure
   const createAtomAccessor = (valArr, activeArr) => {
@@ -255,13 +255,13 @@
   }
 
   // create a new atom given a selector function that returns the atom value
-  const atomPublish = (publishedAtoms, fselector) => {
+  const atomPublish = (publishedAtoms, selector) => {
     let subscribersMap = new Map()
-    let publishedAtomsEntry = [[fselector()], fselector , subscribersMap]
+    let publishedAtomsEntry = [[selector()], selector , subscribersMap]
 
-    const atom = (dispatch, subscriberAction, cleanupSubscriber) => {
-      let subscribersMapEntry = [[true], dispatch, subscriberAction, cleanupSubscriber ] // first element is an array containing the active flag
-      subscribersMap.set({}, subscribersMapEntry) 
+    const atom = (dispatch, subscriberAction, cleanupSubscription) => {
+      let subscribersMapEntry = [[true], dispatch, subscriberAction, cleanupSubscription ] // first element is an array containing the active flag
+      subscribersMap.set(Symbol(), subscribersMapEntry) 
       return createAtomAccessor(publishedAtomsEntry[0], subscribersMapEntry[0]) // minimize closure
     }
 
@@ -272,9 +272,9 @@
   const atomsDispatch = publishedAtoms => {
     const dispatched = new Map() // dispatched: Map<subscriberDispatch, Map<subscriberAction, { newVal, prevVal }>>
 
-    for (const [, [prevArr, fselector, subscribersMap]] of publishedAtoms) {
+    for (const [, [prevArr, selector, subscribersMap]] of publishedAtoms) {
       const prevVal = prevArr[0]
-      const newVal = fselector()
+      const newVal = selector()
 
       if (equal(newVal, prevVal)) continue
       prevArr[0] = newVal
@@ -298,42 +298,42 @@
   
   // register a subscriber so that whenever the atom value (on the publisher) changes
   // the publisher will invoke subscriberDispatch with action
-  // returns fAtomValue: x => val to be used by the subscriber for ie rendering
+  // returns atomAccessor: x => val to be used by the subscriber for ie rendering
   const noAction = () => {}
   const atomSubscribe = (subscribedAtoms, dispatch, atom, subscriberAction = noAction) => {
     let subscribedAtomsToken = {}
     
-    const cleanupSubscriber  = () => { 
+    const cleanupSubscription  = () => { 
       subscribedAtoms.delete(subscribedAtomsToken); 
       atomsSubscriberFinalizationRegistry.unregister(subscribedAtomsToken) 
     }
     
-    let fAtomValue = atom(dispatch, subscriberAction, cleanupSubscriber) // return the ()=>value function
-    subscribedAtoms.set(subscribedAtomsToken, fAtomValue.unsubscribe) 
-    atomsSubscriberFinalizationRegistry.register(fAtomValue, fAtomValue.unsubscribe, subscribedAtomsToken)
-    return fAtomValue
+    let atomAccessor = atom(dispatch, subscriberAction, cleanupSubscription) // return the ()=>value function
+    subscribedAtoms.set(subscribedAtomsToken, atomAccessor.unsubscribe) 
+    atomsSubscriberFinalizationRegistry.register(atomAccessor, atomAccessor.unsubscribe, subscribedAtomsToken)
+    return atomAccessor
   }
 
   const atomUnpublish = (valArr, subscribersMap) => {
-    valArr[0] = undefined // clear value that is held by subscribers fAtomValue
-    for (let [_, [[active], subscriberDispatch, subscriberAction, cleanupSubscriber]] of subscribersMap) {
+    valArr[0] = undefined // clear value that is held by subscribers atomAccessor
+    for (let [_, [[active], subscriberDispatch, subscriberAction, cleanupSubscription]] of subscribersMap) {
       if (!active) continue
-      cleanupSubscriber() 
+      cleanupSubscription() 
       subscriberDispatch([subscriberAction, 'publisherdisconnected']) // notify subscribers
     }
     subscribersMap.clear()
   }
 
-  const quikAppMount = (hostNode, parentNode, appDefFn) => {
+  const quikAppMount = (hostNode, parentNode, createAppDef) => {
     let root = hostNode
     let vdom = h(hostNode.nodeName, {}, [])
-    let busy
+    let renderScheduled = false
     let appDef
     let publishedAtoms = new Map()
     let subscribedAtoms = new Map()
 
     const render = () => {
-      busy = false
+      renderScheduled = false
       let oldVNode = vdom
       let newView = appDef.view()
       vdom = h(root.nodeName, {}, newView)
@@ -343,7 +343,7 @@
     let dispatch = action => {
       if (!hostNode.isConnected) vdom = undefined
       if (!vdom) return // app destroyed
-      if (!isFunc(action) && !isArr(action)) throw "Invalid action" // action must be a function ()=>() or array [ (...params) => () , ...params? ]
+      if (!isFunc(action) && !isArr(action)) throw new Error("Invalid action") // action must be a function ()=>() or array [ (...params) => () , ...params? ]
 
       if (isFunc(action)) action = [action]
       let [f, ...params] = action
@@ -352,14 +352,14 @@
       f(...params)
       appDef.wrapper.forEach(a => (a[1])?.())
 
-      if (!busy) { busy = true; requestAnimationFrame(render) }
+      if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(render) }
 
       if (appDef.properties) for (const [name, getter] of Object.entries(appDef.properties)) hostNode[name] = getter();
 
       atomsDispatch(publishedAtoms)
     }
 
-    appDef = appDefFn({
+    appDef = createAppDef({
       hostNode,
       parentNode,
       H,
@@ -377,7 +377,7 @@
 
     if (appDef.atoms) {
       // convert appDef.atoms to hostNode.atoms
-      let atomEntries = Object.entries(appDef.atoms).map(([name, fselector]) => [name, atomPublish(publishedAtoms, fselector) ])
+      let atomEntries = Object.entries(appDef.atoms).map(([name, selector]) => [name, atomPublish(publishedAtoms, selector) ])
       hostNode.atoms = Object.fromEntries(atomEntries)
     }
     
@@ -389,7 +389,7 @@
     // return the unmount function
     return _ => {
       unmountChildren(vdom.children)
-      for (let [atom, entry] of publishedAtoms) atomUnpublish(entry[1], entry[2]) 
+      for (let [atom, [valArr, selector , subscribersMap]] of publishedAtoms) atomUnpublish(valArr, subscribersMap) 
       publishedAtoms.clear()
       for (let [_, unsubscribe] of subscribedAtoms) unsubscribe()
       appDef.destroy?.()
@@ -398,12 +398,12 @@
   }
 
   window.quikApp = (name, arg0, arg1) => { 
-    const mountFn = typeof arg0 === 'function'
+    const appMountFn = typeof arg0 === 'function'
       ? (hostNode, parentNode) => quikAppMount(hostNode, parentNode, arg0)
       : arg1
 
-    apps.set(name.toLowerCase(), mountFn)
-    return mountFn
+    appRegistry.set(name.toLowerCase(), appMountFn)
+    return appMountFn
   }
 
 
@@ -645,10 +645,10 @@
   }
 
     // register a new app
-    // quikApp is a function: (name, appDefFn) => registers a new app name
+    // quikApp is a function: (name, createAppDef) => registers a new app name
     // name is the the name of the app (a string)
-    // appDefFn is a function: ({ hostNode, parentNode, H, dispatchFn, subscribeAtom, TriggerEvent }) => { view, methods, atoms, wrapper, destroy }
-    // appDefFn will be called when the app is mounted into hostNode, either by a direct call or when mounted as part of another app
+    // createAppDef is a function: ({ hostNode, parentNode, H, dispatchFn, subscribeAtom, TriggerEvent }) => { view, methods, atoms, wrapper, destroy }
+    // createAppDef will be called when the app is mounted into hostNode, either by a direct call or when mounted as part of another app
     // hostNode is the node the app will be rendered into
     // parentNode is the parent of that node
     // H function parses a tagged HTML-template literal into QuikApp’s virtual DOM node tree
